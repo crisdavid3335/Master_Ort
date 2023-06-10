@@ -152,7 +152,7 @@ class Agent:
 
         torch.save(
             self.model.state_dict(),
-            "/mnt/c/Users/crisd/OneDrive/Escritorio/modelo_pesos.pth",
+            "/mnt/c/Users/crisd/OneDrive/Escritorio/python/mario/letra/obligatorio/modelo_pesos.pth",
         )
         writer.close()
 
