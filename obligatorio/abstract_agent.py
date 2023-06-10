@@ -30,6 +30,7 @@ class Agent:
 
         # Funcion phi para procesar los estados.
         self.model = obs_processing_func
+        self.model = self.model.to(self.device)
 
         # Asignarle memoria al agente
         self.memory = ReplayMemory(memory_buffer_size)
@@ -71,7 +72,9 @@ class Agent:
             current_episode_reward = 0.0
 
             for s in range(max_steps):
-                self.qval_ = self.model(torch.from_numpy(np.array(state)).unsqueeze(0))
+                self.qval_ = self.model(
+                    torch.from_numpy(np.array(state)).unsqueeze(0).to(self.device)
+                )
                 # Seleccionar accion usando una política epsilon-greedy.
                 self.epsilon = self.compute_epsilon(s)
                 if random.random() < self.epsilon:
@@ -93,25 +96,25 @@ class Agent:
                     self.minibatch = self.memory.sample(self.batch_size)
                     self.state_batch = torch.cat(
                         [
-                            torch.from_numpy(np.array(s1)).unsqueeze(0)
+                            torch.from_numpy(np.array(s1)).unsqueeze(0).to(self.device)
                             for (s1, a, r, d, s2) in self.minibatch
                         ]
-                    )
+                    ).to(self.device)
                     self.action_batch = torch.Tensor(
                         [a for (s1, a, r, d, s2) in self.minibatch]
-                    )
+                    ).to(self.device)
                     self.reward_batch = torch.Tensor(
                         [r for (s1, a, r, d, s2) in self.minibatch]
-                    )
+                    ).to(self.device)
                     self.done_batch = torch.Tensor(
                         [d for (s1, a, r, d, s2) in self.minibatch]
-                    )
+                    ).to(self.device)
                     self.next_state_batch = torch.cat(
                         [
-                            torch.from_numpy(np.array(s2)).unsqueeze(0)
+                            torch.from_numpy(np.array(s2)).unsqueeze(0).to(self.device)
                             for (s1, a, r, d, s2) in self.minibatch
                         ]
-                    )
+                    ).to(self.device)
 
                     Q1 = self.model(self.state_batch)
                     with torch.no_grad():
@@ -175,7 +178,9 @@ class Agent:
 
         while not done:
             # env.render()  # Queremos hacer render para obtener un video al final.
-            self.qval_ = self.model(torch.from_numpy(np.array(state)).unsqueeze(0))
+            self.qval_ = self.model(
+                torch.from_numpy(np.array(state)).unsqueeze(0).to(self.device)
+            )
             action = torch.argmax(self.qval_).item()
             state, reward, done, info = env.step(action)
             if done:
