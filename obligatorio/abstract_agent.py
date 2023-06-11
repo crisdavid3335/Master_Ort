@@ -60,7 +60,7 @@ class Agent:
         rewards = []
         total_steps = 0
         writer = SummaryWriter(comment="-" + writer_name)
-        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
         losses = []
 
         for ep in tqdm(range(number_episodes), unit=" episodes"):
@@ -127,10 +127,10 @@ class Agent:
                         dim=1, index=self.action_batch.long().unsqueeze(dim=1)
                     ).squeeze()
                     loss = self.loss_fn(X, Y.detach())
-                    optimizer.zero_grad()
+                    self.optimizer.zero_grad()
                     loss.backward()
                     losses.append(loss.item())
-                    optimizer.step()
+                    self.optimizer.step()
 
                 if done:
                     break
