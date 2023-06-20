@@ -10,8 +10,7 @@ import random
 import numpy as np
 
 
-class Agent:
-    # class Agent(ABC):
+class Agent(ABC):
     def __init__(
         self,
         gym_env,
@@ -29,8 +28,7 @@ class Agent:
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         # Funcion phi para procesar los estados.
-        self.model = obs_processing_func
-        self.model = self.model.to(self.device)
+        self.obs_processing_func = obs_processing_func
 
         # Asignarle memoria al agente
         self.memory = ReplayMemory(memory_buffer_size)
@@ -40,7 +38,6 @@ class Agent:
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.gamma = gamma
-        self.loss_fn = nn.MSELoss()
 
         self.epsilon_i = epsilon_i
         self.epsilon_f = epsilon_f
@@ -48,20 +45,17 @@ class Agent:
         self.epsilon_decay = epsilon_decay
         self.episode_block = episode_block
 
-        self.total_steps = 0
-
     def train(
         self,
         number_episodes=50000,
-        max_steps_episode=10000,
+        max_steps_for_episode=10000,
         max_steps=1000000,
         writer_name="default_writer_name",
+        act_s_freq=700,
     ):
         rewards = []
         total_steps = 0
         writer = SummaryWriter(comment="-" + writer_name)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        losses = []
 
         for ep in tqdm(range(number_episodes), unit=" episodes"):
             if total_steps > max_steps:
@@ -70,19 +64,14 @@ class Agent:
             # Observar estado inicial como indica el algoritmo
             state = self.env.reset()
             current_episode_reward = 0.0
-
-            for s in range(max_steps):
-                self.qval_ = self.model(
-                    torch.from_numpy(np.array(state)).unsqueeze(0).to(self.device)
-                )
+            state = self.obs_processing_func(state)
+            for s in range(max_steps_for_episode):
                 # Seleccionar accion usando una política epsilon-greedy.
-                self.epsilon = self.compute_epsilon(s)
-                if random.random() < self.epsilon:
-                    action = torch.randint(0, self.env.action_space.n, (1,)).item()
-                else:
-                    action = torch.argmax(self.qval_).item()
+                action = self.select_action(state, ep)
                 # Ejecutar la accion, observar resultado y procesarlo como indica el algoritmo.
                 next_state, reward, done, info = self.env.step(action)
+
+                next_state = self.obs_processing_func(next_state)
                 current_episode_reward += reward
                 total_steps += 1
 
@@ -92,52 +81,19 @@ class Agent:
                 # Actualizar el estado
                 state = next_state
                 # Actualizar el modelo
-                if len(self.memory) > self.batch_size:
-                    self.minibatch = self.memory.sample(self.batch_size)
-                    self.state_batch = torch.cat(
-                        [
-                            torch.from_numpy(np.array(s1)).unsqueeze(0).to(self.device)
-                            for (s1, a, r, d, s2) in self.minibatch
-                        ]
-                    ).to(self.device)
-                    self.action_batch = torch.Tensor(
-                        [a for (s1, a, r, d, s2) in self.minibatch]
-                    ).to(self.device)
-                    self.reward_batch = torch.Tensor(
-                        [r for (s1, a, r, d, s2) in self.minibatch]
-                    ).to(self.device)
-                    self.done_batch = torch.Tensor(
-                        [d for (s1, a, r, d, s2) in self.minibatch]
-                    ).to(self.device)
-                    self.next_state_batch = torch.cat(
-                        [
-                            torch.from_numpy(np.array(s2)).unsqueeze(0).to(self.device)
-                            for (s1, a, r, d, s2) in self.minibatch
-                        ]
-                    ).to(self.device)
+                self.update_weights()
 
-                    Q1 = self.model(self.state_batch)
-                    with torch.no_grad():
-                        Q2 = self.model(self.next_state_batch)
-
-                    Y = self.reward_batch + self.gamma * (
-                        (1 - self.done_batch) * torch.max(Q2, dim=1)[0]
-                    )
-                    X = Q1.gather(
-                        dim=1, index=self.action_batch.long().unsqueeze(dim=1)
-                    ).squeeze()
-                    loss = self.loss_fn(X, Y.detach())
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    losses.append(loss.item())
-                    self.optimizer.step()
+                if s % act_s_freq == 0:
+                    self.act_s()
 
                 if done:
                     break
-                if s == max_steps_episode:
-                    break
 
             rewards.append(current_episode_reward)
+
+            if current_episode_reward > max(rewards):
+                self.load_best_model(current_episode_reward)
+
             mean_reward = np.mean(rewards[-100:])
             writer.add_scalar("epsilon", self.epsilon, total_steps)
             writer.add_scalar("reward_100", mean_reward, total_steps)
@@ -146,56 +102,51 @@ class Agent:
             # Report on the traning rewards every EPISODE BLOCK episodes
             if ep % self.episode_block == 0:
                 print(
-                    f"Episode {ep} - Avg. Reward over the last {self.episode_block} episodes {np.mean(rewards[-self.episode_block:])} epsilon {self.epsilon} total steps {total_steps}"
+                    f"Episode {ep} - Avg. Reward over the last {self.episode_block} episodes {np.mean(rewards[-self.episode_block:]):.3f} epsilon {self.epsilon:.2f} total steps {total_steps}"
                 )
 
-        print(
-            f"Episode {ep + 1} - Avg. Reward over the last {self.episode_block} episodes {np.mean(rewards[-self.episode_block:])} epsilon {self.epsilon} total steps {total_steps}"
-        )
-
-        torch.save(
-            self.model.state_dict(),
-            "/mnt/c/Users/crisd/OneDrive/Escritorio/python/mario/letra/obligatorio/modelo_pesos.pth",
-        )
+            print(
+                f"Episode {ep + 1} - Avg. Reward over the last {self.episode_block} episodes {np.mean(rewards[-self.episode_block:]):.3f} epsilon {self.epsilon:.2f} total steps {total_steps}"
+            )
         writer.close()
-
+        self.load_best_model()
         return rewards
 
     def compute_epsilon(self, steps_so_far):
-        if steps_so_far < self.epsilon_anneal:
-            # Utiliza una función no lineal para acelerar la disminución de epsilon
-            epsilon_ratio = 1 - (steps_so_far / self.epsilon_anneal)
-            return self.epsilon_i * epsilon_ratio + self.epsilon_f * (1 - epsilon_ratio)
-        else:
-            return self.epsilon_f
+        eps = self.epsilon_i - (self.epsilon_i - self.epsilon_f) * min(
+            1, steps_so_far / self.epsilon_anneal
+        )
+        return eps
 
     def record_test_episode(self, env):
         done = False
-
-        env = wrap_env(env)
         state = env.reset()
         # Observar estado inicial como indica el algoritmo
-
+        state = self.obs_processing_func(state)
         while not done:
             # env.render()  # Queremos hacer render para obtener un video al final.
-            self.qval_ = self.model(
-                torch.from_numpy(np.array(state)).unsqueeze(0).to(self.device)
-            )
-            action = torch.argmax(self.qval_).item()
+            action = self.select_action(state, 0, False)
             state, reward, done, info = env.step(action)
+            # Actualizar el estado
+            state = self.obs_processing_func(state)
             if done:
                 break
-
-            # Actualizar el estado
 
         env.close()
         show_video()
 
+    @abstractmethod
+    def select_action(self, state, current_steps, train=True):
+        pass
 
-#    @abstractmethod
-#    def select_action(self, state, current_steps, train=True):
-#        pass
-#
-#    @abstractmethod
-#    def update_weights(self):
-#        pass
+    @abstractmethod
+    def update_weights(self):
+        pass
+
+    @abstractmethod
+    def act_s(self):
+        pass
+
+    @abstractmethod
+    def load_best_model(self):
+        pass

@@ -25,7 +25,6 @@ class DoubleDQNAgent(Agent):
         epsilon_anneal_time,
         epsilon_decay,
         episode_block,
-        sync_target=100,
     ):
         super().__init__(
             gym_env,
@@ -40,21 +39,33 @@ class DoubleDQNAgent(Agent):
             epsilon_decay,
             episode_block,
         )
-
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         # Asignar los modelos al agente (y enviarlos al dispositivo adecuado)
-        self.q_a = model_a
-        self.q_b = model_b
+        self.modelo_a = model_a
+        self.modelo_b = model_b
         self.env = gym_env
         # Asignar una función de costo (MSE)  (y enviarla al dispositivo adecuado)
         self.loss_function = nn.MSELoss()
 
         # Asignar un optimizador para cada modelo (Adam)
         self.optimizer_A = torch.optim.Adam(
-            self.q_a.parameters(), lr=self.learning_rate
+            self.modelo_a.parameters(), lr=self.learning_rate
         )
         self.optimizer_B = torch.optim.Adam(
-            self.q_b.parameters(), lr=self.learning_rate
+            self.modelo_b.parameters(), lr=self.learning_rate
         )
+        self.obs_processing_func = obs_processing_func
+
+    def act_s(self):
+        pass
+
+    def load_best_model(self, current_episode_reward=0):
+        self.best_reward = current_episode_reward
+        self.best_model_params_a = self.modelo_a.state_dict()
+        self.best_model_params_b = self.modelo_b.state_dict()
+        if current_episode_reward == 0:
+            self.modelo_a.load_state_dict(self.best_model_params_a)
+            self.modelo_b.load_state_dict(self.best_model_params_b)
 
     def select_action(self, state, current_steps, train=True):
         # Implementar. Seleccionando acciones epsilongreedy-mente (sobre Q_a + Q_b)
@@ -62,20 +73,19 @@ class DoubleDQNAgent(Agent):
         if train:
             self.epsilon = self.compute_epsilon(current_steps)
             if random.random() < self.epsilon:
-                action = torch.randint(0, self.env.action_space.n, (1,)).item()
+                return torch.randint(0, self.env.action_space.n, (1,)).item()
             else:
-                action = torch.argmax(self.q_a + self.q_b).item()
+                return torch.argmax(
+                    (self.modelo_a(state) + self.modelo_b(state))
+                ).item()
         else:
-            action = torch.argmax(self.q_a + self.q_b).item()
+            return torch.argmax((self.modelo_a(state) + self.modelo_b(state))).item()
 
     def update_weights(self):
         if len(self.memory) > self.batch_size:
             self.minibatch = self.memory.sample(self.batch_size)
             self.state_batch = torch.cat(
-                [
-                    torch.from_numpy(np.array(s1)).unsqueeze(0).to(self.device)
-                    for (s1, a, r, d, s2) in self.minibatch
-                ]
+                [s1 for (s1, a, r, d, s2) in self.minibatch]
             ).to(self.device)
             self.action_batch = torch.Tensor(
                 [a for (s1, a, r, d, s2) in self.minibatch]
@@ -87,25 +97,38 @@ class DoubleDQNAgent(Agent):
                 [d for (s1, a, r, d, s2) in self.minibatch]
             ).to(self.device)
             self.next_state_batch = torch.cat(
-                [
-                    torch.from_numpy(np.array(s2)).unsqueeze(0).to(self.device)
-                    for (s1, a, r, d, s2) in self.minibatch
-                ]
+                [s2 for (s1, a, r, d, s2) in self.minibatch]
             ).to(self.device)
-            # Actualizar al azar Q_a o Q_b usando el otro para calcular el valor de los siguientes estados.
-            Q1 = self.q_a(self.state_batch)
-            with torch.no_grad():
-                Q2 = self.q_b(self.state_batch)
-            # Para el Q elegido:
-            # Obetener el valor estado-accion (Q) de acuerdo al Q seleccionado.
-            Y = self.reward_batch + self.gamma * (
-                (1 - self.done_batch) * torch.max(Q2, dim=1)[0]
-            )
-            X = Q1.gather(
-                dim=1, index=self.action_batch.long().unsqueeze(dim=1)
-            ).squeeze()
 
-            # Compute el target de DQN de acuerdo a la Ecuacion (3) del paper.
-            loss = self.loss_function(X, Y.detach())
-            self.optimizer_A.zero_grad()
-            self.optimizer_A.step()
+            # Actualizar al azar Q_a o Q_b usando el otro para calcular el valor de los siguientes estados.
+            if random.randrange(0, 2) == 1:
+                Q1 = self.modelo_a(self.state_batch)
+                with torch.no_grad():
+                    Q2 = self.modelo_b(self.next_state_batch)
+
+                Y = self.reward_batch + self.gamma * (
+                    (1 - self.done_batch) * torch.max(Q2, dim=1)[0]
+                )
+                X = Q1.gather(
+                    dim=1, index=self.action_batch.long().unsqueeze(dim=1)
+                ).squeeze()
+                loss = self.loss_function(X, Y.detach())
+                self.optimizer_A.zero_grad()
+                loss.backward()
+                self.optimizer_A.step()
+            else:
+                Q1 = self.modelo_b(self.state_batch)
+                with torch.no_grad():
+                    Q2 = self.modelo_a(self.next_state_batch)
+                # Para el Q elegido:
+                # Obetener el valor estado-accion (Q) de acuerdo al Q seleccionado.
+                Y = self.reward_batch + self.gamma * (
+                    (1 - self.done_batch) * torch.max(Q2, dim=1)[0]
+                )
+                X = Q1.gather(
+                    dim=1, index=self.action_batch.long().unsqueeze(dim=1)
+                ).squeeze()
+                loss = self.loss_function(X, Y.detach())
+                self.optimizer_B.zero_grad()
+                loss.backward()
+                self.optimizer_B.step()
