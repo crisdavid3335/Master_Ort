@@ -40,6 +40,8 @@ class DQNAgent(Agent):
         )
         # Asignar el modelo al agente (y enviarlo al dispositivo adecuado)
         self.policy_net = model
+        # Resto del código de inicialización
+
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         # Asignar una función de costo (MSE)  (y enviarla al dispositivo adecuado)
         self.loss_function = nn.MSELoss().to(self.device)
@@ -53,6 +55,9 @@ class DQNAgent(Agent):
     def act_s(self):
         pass
 
+    def save_every_f(self, save_every):
+        pass
+
     def load_best_model(self, current_episode_reward=0):
         self.best_reward = current_episode_reward
         self.best_model_params = self.policy_net.state_dict()
@@ -64,10 +69,9 @@ class DQNAgent(Agent):
         if train:
             self.epsilon = self.compute_epsilon(current_steps)
             if random.random() < self.epsilon:
-                action = torch.randint(0, self.env.action_space.n, (1,)).item()
+                return torch.randint(0, self.env.action_space.n, (1,)).item()
             else:
-                action = torch.argmax(self.policy_net(state)).item()
-            return action
+                return torch.argmax(self.policy_net(state)).item()
         else:
             return torch.argmax(self.policy_net(state)).item()
 
@@ -75,7 +79,10 @@ class DQNAgent(Agent):
         if len(self.memory) > self.batch_size:
             self.minibatch = self.memory.sample(self.batch_size)
             self.state_batch = torch.cat(
-                [s1 for (s1, a, r, d, s2) in self.minibatch]
+                [
+                    torch.from_numpy(np.array(s1.cpu())).unsqueeze(0).to(self.device)
+                    for (s1, a, r, d, s2) in self.minibatch
+                ]
             ).to(self.device)
             self.action_batch = torch.Tensor(
                 [a for (s1, a, r, d, s2) in self.minibatch]
@@ -87,20 +94,25 @@ class DQNAgent(Agent):
                 [d for (s1, a, r, d, s2) in self.minibatch]
             ).to(self.device)
             self.next_state_batch = torch.cat(
-                [s2 for (s1, a, r, d, s2) in self.minibatch]
+                [
+                    torch.from_numpy(np.array(s2.cpu())).unsqueeze(0).to(self.device)
+                    for (s1, a, r, d, s2) in self.minibatch
+                ]
             ).to(self.device)
 
-            Q1 = self.policy_net(self.state_batch)
+            Q1 = self.policy_net(self.state_batch).to(self.device)
             with torch.no_grad():
-                Q2 = self.policy_net(self.next_state_batch)
+                Q2 = self.policy_net(self.next_state_batch).to(self.device)
 
             Y = self.reward_batch + self.gamma * (
                 (1 - self.done_batch) * torch.max(Q2, dim=1)[0]
+            ).to(self.device)
+            X = (
+                Q1.gather(dim=1, index=self.action_batch.long().unsqueeze(dim=1))
+                .squeeze()
+                .to(self.device)
             )
-            X = Q1.gather(
-                dim=1, index=self.action_batch.long().unsqueeze(dim=1)
-            ).squeeze()
-            loss = self.loss_function(X, Y.detach())
+            loss = self.loss_fn(X, Y.detach())
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()

@@ -70,7 +70,6 @@ class Agent(ABC):
                 action = self.select_action(state, ep)
                 # Ejecutar la accion, observar resultado y procesarlo como indica el algoritmo.
                 next_state, reward, done, info = self.env.step(action)
-
                 next_state = self.obs_processing_func(next_state)
                 current_episode_reward += reward
                 total_steps += 1
