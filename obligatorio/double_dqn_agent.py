@@ -8,61 +8,31 @@ import numpy as np
 from abstract_agent import Agent
 import random
 
-
 class DoubleDQNAgent(Agent):
-    def __init__(
-        self,
-        gym_env,
-        model_a,
-        model_b,
-        obs_processing_func,
-        memory_buffer_size,
-        batch_size,
-        learning_rate,
-        gamma,
-        epsilon_i,
-        epsilon_f,
-        epsilon_anneal_time,
-        epsilon_decay,
-        episode_block,
-        save_every,
-        path_pesos_a,
-        path_pesos_b,
-        sync_target=100,
-    ):
-        super().__init__(
-            gym_env,
-            obs_processing_func,
-            memory_buffer_size,
-            batch_size,
-            learning_rate,
-            gamma,
-            epsilon_i,
-            epsilon_f,
-            epsilon_anneal_time,
-            epsilon_decay,
-            episode_block,
-            save_every,
-        )
-
+    def __init__(self, gym_env, model_a, model_b, obs_processing_func, memory_buffer_size, batch_size, learning_rate, gamma,
+                 epsilon_i, epsilon_f, epsilon_anneal_time, epsilon_decay, episode_block, save_every, path_pesos_a, path_pesos_b , sync_target =  100):
+        
+        super().__init__(gym_env, obs_processing_func, memory_buffer_size, batch_size, learning_rate, gamma,
+                 epsilon_i, epsilon_f, epsilon_anneal_time, epsilon_decay, episode_block, save_every)              
+        
         # Dispositivo
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+        
         # Solo es para que guarde
         self.save_every = save_every
-        self.path_pesos_a = path_pesos_a
+        self.path_pesos_a = path_pesos_a 
         self.path_pesos_b = path_pesos_b
 
         # Asignar los modelos al agente (y enviarlos al dispositivo adecuado)
         self.q_a = model_a.to(self.device)
         self.q_a.load_state_dict(torch.load(self.path_pesos_a))
-
+    
         self.q_b = model_b.to(self.device)
         self.q_b.load_state_dict(torch.load(self.path_pesos_b))
 
         # Asignar una función de costo (MSE)  (y enviarla al dispositivo adecuado)
         self.loss_function = nn.MSELoss().to(self.device)
-
+        
         # Asignar un optimizador para cada modelo (Adam)
         self.optimizer_A = torch.optim.Adam(self.q_a.parameters(), lr=learning_rate)
         self.optimizer_B = torch.optim.Adam(self.q_b.parameters(), lr=learning_rate)
@@ -84,7 +54,7 @@ class DoubleDQNAgent(Agent):
             self.epsilon = self.compute_epsilon(current_steps)
             if random.random() > self.epsilon:
                 # Seleccionar la acción greedy utilizando el modelo de política
-                return (self.q_a(state) + self.q_b(state)).max(1)[1].view(1, 1)
+                return (self.q_a(state)+self.q_b(state)).max(1)[1].view(1, 1)
             else:
                 # Seleccionar una acción aleatoria del espacio de acciones del entorno
                 return torch.tensor(
@@ -94,7 +64,7 @@ class DoubleDQNAgent(Agent):
                 )
         else:
             # Seleccionar la acción greedy utilizando el modelo de política sin tener en cuenta la exploración epsilon
-            return (self.q_a(state) + self.q_b(state)).max(1)[1].view(1, 1)
+            return (self.q_a(state)+self.q_b(state)).max(1)[1].view(1, 1)
 
     def save_weights(self):
         """
@@ -126,45 +96,49 @@ class DoubleDQNAgent(Agent):
 
             # Actualizar al azar Q_a o Q_b usando el otro para calcular el valor de los siguientes estados.
             if random.random() > 0.5:
-                # Resetear gradientes
-                self.optimizer_A.zero_grad()
+              # Resetear gradientes
+              self.optimizer_A.zero_grad()
 
-                # Obtener el valor estado-acción (Q) de acuerdo a la policy net para todos los elementos (estados) del minibatch.
-                q_actual = self.q_a(state_batch)
+              # Obtener el valor estado-acción (Q) de acuerdo a la policy net para todos los elementos (estados) del minibatch.
+              q_actual = self.q_a(state_batch)
 
-                # Obtener max a' Q para los siguientes estados (del minibatch). Es importante hacer .detach() al resultado de este cálculo.
-                # Si el estado siguiente es terminal (done) este valor debería ser 0.
-                q_siguiente = self.q_b(next_states).detach()
-                max_q_siguiente = torch.max(q_siguiente, dim=1)[0].unsqueeze(dim=1)
+              # Obtener max a' Q para los siguientes estados (del minibatch). Es importante hacer .detach() al resultado de este cálculo.
+              # Si el estado siguiente es terminal (done) este valor debería ser 0.
+              q_siguiente = self.q_b(next_states).detach()
+              max_q_siguiente = torch.max(q_siguiente, dim=1)[0].unsqueeze(dim=1)
 
-                # Calcular el target de DQN de acuerdo a la Ecuación (3) del paper.
-                Y = reward_batch + self.gamma * ((1 - dones) * max_q_siguiente)
-                X = q_actual.gather(1, action_batch)
+              # Calcular el target de DQN de acuerdo a la Ecuación (3) del paper.
+              Y = reward_batch + self.gamma * ((1 - dones) * max_q_siguiente)
+              X = q_actual.gather(1, action_batch)
 
-                # Calcular el costo y actualizar los pesos.
-                # En PyTorch, la función de costo se llama con (predicciones, objetivos) en ese orden.
-                loss = self.loss_function(X.squeeze(), Y.squeeze())
-                loss.backward()
-                self.optimizer_A.step()
-
+              # Calcular el costo y actualizar los pesos.
+              # En PyTorch, la función de costo se llama con (predicciones, objetivos) en ese orden.
+              loss = self.loss_function(X.squeeze(), Y.squeeze())
+              loss.backward()
+              self.optimizer_A.step()
+            
             else:
-                # Resetear gradientes
-                self.optimizer_B.zero_grad()
+              # Resetear gradientes
+              self.optimizer_B.zero_grad()
 
-                # Obtener el valor estado-acción (Q) de acuerdo a la policy net para todos los elementos (estados) del minibatch.
-                q_actual = self.q_b(state_batch)
+              # Obtener el valor estado-acción (Q) de acuerdo a la policy net para todos los elementos (estados) del minibatch.
+              q_actual = self.q_b(state_batch)
 
-                # Obtener max a' Q para los siguientes estados (del minibatch). Es importante hacer .detach() al resultado de este cálculo.
-                # Si el estado siguiente es terminal (done) este valor debería ser 0.
-                q_siguiente = self.q_a(next_states).detach()
-                max_q_siguiente = torch.max(q_siguiente, dim=1)[0].unsqueeze(dim=1)
+              # Obtener max a' Q para los siguientes estados (del minibatch). Es importante hacer .detach() al resultado de este cálculo.
+              # Si el estado siguiente es terminal (done) este valor debería ser 0.
+              q_siguiente = self.q_a(next_states).detach()
+              max_q_siguiente = torch.max(q_siguiente, dim=1)[0].unsqueeze(dim=1)
 
-                # Calcular el target de DQN de acuerdo a la Ecuación (3) del paper.
-                Y = reward_batch + self.gamma * ((1 - dones) * max_q_siguiente)
-                X = q_actual.gather(1, action_batch)
+              # Calcular el target de DQN de acuerdo a la Ecuación (3) del paper.
+              Y = reward_batch + self.gamma * ((1 - dones) * max_q_siguiente)
+              X = q_actual.gather(1, action_batch)
 
-                # Calcular el costo y actualizar los pesos.
-                # En PyTorch, la función de costo se llama con (predicciones, objetivos) en ese orden.
-                loss = self.loss_function(X.squeeze(), Y.squeeze())
-                loss.backward()
-                self.optimizer_B.step()
+              # Calcular el costo y actualizar los pesos.
+              # En PyTorch, la función de costo se llama con (predicciones, objetivos) en ese orden.
+              loss = self.loss_function(X.squeeze(), Y.squeeze())
+              loss.backward()
+              self.optimizer_B.step()
+
+
+
+
