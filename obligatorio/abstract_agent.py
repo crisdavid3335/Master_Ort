@@ -1,12 +1,10 @@
 import torch
-from torch import optim
 import torch.nn as nn
-from replay_memory import ReplayMemory
+from replay_memory import ReplayMemory, Transition
 from abc import ABC, abstractmethod
-from tqdm import tqdm
+from tqdm.notebook import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from mario_utils import show_video, wrap_env
-import random
+from mario_utils import show_video
 import numpy as np
 
 
@@ -24,19 +22,20 @@ class Agent(ABC):
         epsilon_anneal_time,
         epsilon_decay,
         episode_block,
+        save_every,
     ):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         # Funcion phi para procesar los estados.
-        self.obs_processing_func = obs_processing_func
+        self.state_processing_function = obs_processing_func
 
         # Asignarle memoria al agente
         self.memory = ReplayMemory(memory_buffer_size)
+
         self.env = gym_env
 
         # Hyperparameters
         self.batch_size = batch_size
-        self.learning_rate = learning_rate
         self.gamma = gamma
 
         self.epsilon_i = epsilon_i
@@ -45,94 +44,153 @@ class Agent(ABC):
         self.epsilon_decay = epsilon_decay
         self.episode_block = episode_block
 
+        self.total_steps = 0
+        self.save_every = save_every
+        self.epsilon = self.epsilon_i
+
     def train(
         self,
         number_episodes=50000,
-        max_steps_for_episode=10000,
+        max_steps_episode=10000,
         max_steps=1000000,
         writer_name="default_writer_name",
-        act_s_freq=700,
     ):
-        rewards = []
-        total_steps = 0
-        writer = SummaryWriter(comment="-" + writer_name)
+        """
+        Entrena el modelo de Reinforcement Learning mediante el algoritmo DQN.
 
+        Args:
+            number_episodes (int): Número total de episodios a entrenar. Por defecto: 50000.
+            max_steps_episode (int): Número máximo de pasos por episodio. Por defecto: 10000.
+            max_steps (int): Número máximo de pasos totales. Por defecto: 1000000.
+            writer_name (str): Nombre del escritor de TensorBoard. Por defecto: "default_writer_name".
+
+        Returns:
+            list: Lista de recompensas obtenidas en cada episodio.
+        """
+        rewards = []  # Lista para almacenar las recompensas obtenidas en cada episodio
+        total_steps = 0  # Contador de pasos totales
+        writer = SummaryWriter(
+            comment="-" + writer_name
+        )  # Crear objeto SummaryWriter para TensorBoard
+
+        # Bucle para los pasos dentro de un episodio
         for ep in tqdm(range(number_episodes), unit=" episodes"):
             if total_steps > max_steps:
                 break
 
             # Observar estado inicial como indica el algoritmo
             state = self.env.reset()
+            state = self.state_processing_function(state)
+            state = torch.tensor(
+                state, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
+
+            # Inicializar la recompensa acumulada para el episodio actual
             current_episode_reward = 0.0
-            state = self.obs_processing_func(state)
-            for s in range(max_steps_for_episode):
-                # Seleccionar accion usando una política epsilon-greedy.
-                action = self.select_action(state, ep)
-                # Ejecutar la accion, observar resultado y procesarlo como indica el algoritmo.
-                next_state, reward, done, info = self.env.step(action)
-                next_state = self.obs_processing_func(next_state)
-                current_episode_reward += reward
+
+            # Bucle para los pasos dentro de un episodio
+            for s in range(max_steps):
+                # Seleccionar acción usando una política epsilon-greedy.
+                action = self.select_action(state, total_steps)
+
+                # Ejecutar la acción, observar el resultado y procesarlo como indica el algoritmo.
+                next_state, r, done, info = self.env.step(action.item())
+                reward = torch.tensor([r], device=self.device)
+                current_episode_reward += r
                 total_steps += 1
 
-                # Guardar la transicion en la memoria
+                # Controlar que el siguiente estado sea 0 en caso de estado terminal
+                next_state = torch.tensor(
+                    self.state_processing_function(next_state),
+                    dtype=torch.float32,
+                    device=self.device,
+                ).unsqueeze(0)
+
+                # Guardar la transición en la memoria
                 self.memory.add(state, action, reward, done, next_state)
 
                 # Actualizar el estado
                 state = next_state
+
                 # Actualizar el modelo
                 self.update_weights()
 
-                if s % act_s_freq == 0:
-                    self.act_s()
-
+                # Finalizar el episodio si se alcanza un estado terminal
                 if done:
                     break
 
+            # Calcular la media de las últimas 100 recompensas
             rewards.append(current_episode_reward)
-
-            if current_episode_reward > max(rewards):
-                self.load_best_model(current_episode_reward)
-
             mean_reward = np.mean(rewards[-100:])
+
+            # Registrar los valores en TensorBoard
             writer.add_scalar("epsilon", self.epsilon, total_steps)
             writer.add_scalar("reward_100", mean_reward, total_steps)
             writer.add_scalar("reward", current_episode_reward, total_steps)
 
-            # Report on the traning rewards every EPISODE BLOCK episodes
+            # Guardar los pesos del modelo cada cierto número de pasos
+            if total_steps % self.save_every == 0:
+                self.save_weights()
+
+            # Mostrar el reporte de recompensas de entrenamiento cada cierto número de episodios
             if ep % self.episode_block == 0:
                 print(
-                    f"Episode {ep} - Avg. Reward over the last {self.episode_block} episodes {np.mean(rewards[-self.episode_block:]):.3f} epsilon {self.epsilon:.2f} total steps {total_steps}"
+                    f"Episode {ep} - Avg. Reward over the last {self.episode_block} episodes {np.mean(rewards[-self.episode_block:])} epsilon {self.epsilon:.2f} total steps {total_steps}"
                 )
-
-            print(
-                f"Episode {ep + 1} - Avg. Reward over the last {self.episode_block} episodes {np.mean(rewards[-self.episode_block:]):.3f} epsilon {self.epsilon:.2f} total steps {total_steps}"
-            )
+            # Imprimir el último reporte de recompensas y pasos totales
+        print(
+            f"Episode {ep + 1} - Avg. Reward over the last {self.episode_block} episodes {np.mean(rewards[-self.episode_block:])} epsilon {self.epsilon:.2f} total steps {total_steps}"
+        )
+        # Cerrar el objeto SummaryWriter
         writer.close()
-        self.load_best_model()
+
         return rewards
 
     def compute_epsilon(self, steps_so_far):
-        eps = self.epsilon_i - (self.epsilon_i - self.epsilon_f) * min(
-            1, steps_so_far / self.epsilon_anneal
-        )
-        return eps
+        """
+        Calcula el valor actual de epsilon para la política epsilon-greedy.
+
+        Args:
+            steps_so_far (int): Número de pasos realizados hasta ahora.
+
+        Returns:
+            float: Valor actual de epsilon.
+
+        """
+        # Actualiza el valor de epsilon multiplicándolo por un factor de decaimiento.
+        self.epsilon = max(self.epsilon_f, self.epsilon * self.epsilon_decay)
+        return self.epsilon
 
     def record_test_episode(self, env):
+        # Ejecuta un episodio de prueba en el entorno y registra el rendimiento del agente.
         done = False
-        state = env.reset()
+
         # Observar estado inicial como indica el algoritmo
-        state = self.obs_processing_func(state)
+        state = env.reset()
+        state = self.state_processing_function(state)
+        state = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(
+            0
+        )
+
         while not done:
-            # env.render()  # Queremos hacer render para obtener un video al final.
+            env.render()  # Queremos hacer render para obtener un video al final.
+
+            # Seleccione una accion de forma completamente greedy.
             action = self.select_action(state, 0, False)
-            state, reward, done, info = env.step(action)
-            # Actualizar el estado
-            state = self.obs_processing_func(state)
+
+            # Ejecutar la accion, observar resultado y procesarlo como indica el algoritmo.
+            state, r, done, info = env.step(action.item())
+            state = self.state_processing_function(state)
+            state = torch.tensor(
+                state, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
+
             if done:
                 break
+            # Actualizar el estado
 
         env.close()
-        show_video()
+        show_video()  # Mostrar el video del rendimiento del agente.
 
     @abstractmethod
     def select_action(self, state, current_steps, train=True):
@@ -143,9 +201,5 @@ class Agent(ABC):
         pass
 
     @abstractmethod
-    def act_s(self):
-        pass
-
-    @abstractmethod
-    def load_best_model(self):
+    def save_weights(self):
         pass

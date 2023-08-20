@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from replay_memory import ReplayMemory
+from replay_memory import ReplayMemory, Transition
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.notebook import tqdm
 import numpy as np
@@ -25,6 +25,10 @@ class DoubleDQNAgent(Agent):
         epsilon_anneal_time,
         epsilon_decay,
         episode_block,
+        save_every,
+        path_pesos_a,
+        path_pesos_b,
+        sync_target=100,
     ):
         super().__init__(
             gym_env,
@@ -38,97 +42,129 @@ class DoubleDQNAgent(Agent):
             epsilon_anneal_time,
             epsilon_decay,
             episode_block,
+            save_every,
         )
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+        # Dispositivo
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Solo es para que guarde
+        self.save_every = save_every
+        self.path_pesos_a = path_pesos_a
+        self.path_pesos_b = path_pesos_b
+
         # Asignar los modelos al agente (y enviarlos al dispositivo adecuado)
-        self.modelo_a = model_a
-        self.modelo_b = model_b
-        self.env = gym_env
+        self.q_a = model_a.to(self.device)
+        self.q_a.load_state_dict(torch.load(self.path_pesos_a))
+
+        self.q_b = model_b.to(self.device)
+        self.q_b.load_state_dict(torch.load(self.path_pesos_b))
+
         # Asignar una función de costo (MSE)  (y enviarla al dispositivo adecuado)
-        self.loss_function = nn.MSELoss()
+        self.loss_function = nn.MSELoss().to(self.device)
 
         # Asignar un optimizador para cada modelo (Adam)
-        self.optimizer_A = torch.optim.Adam(
-            self.modelo_a.parameters(), lr=self.learning_rate
-        )
-        self.optimizer_B = torch.optim.Adam(
-            self.modelo_b.parameters(), lr=self.learning_rate
-        )
-        self.obs_processing_func = obs_processing_func
-
-    def act_s(self):
-        pass
-
-    def load_best_model(self, current_episode_reward=0):
-        self.best_reward = current_episode_reward
-        self.best_model_params_a = self.modelo_a.state_dict()
-        self.best_model_params_b = self.modelo_b.state_dict()
-        if current_episode_reward == 0:
-            self.modelo_a.load_state_dict(self.best_model_params_a)
-            self.modelo_b.load_state_dict(self.best_model_params_b)
+        self.optimizer_A = torch.optim.Adam(self.q_a.parameters(), lr=learning_rate)
+        self.optimizer_B = torch.optim.Adam(self.q_b.parameters(), lr=learning_rate)
+        self.gamma = gamma
 
     def select_action(self, state, current_steps, train=True):
-        # Implementar. Seleccionando acciones epsilongreedy-mente (sobre Q_a + Q_b)
-        # si estamos entranando y completamente greedy en otro caso.
+        """
+        Selecciona una acción epsilon-greedy si se está entrenando y completamente greedy en otro caso.
+
+        Args:
+            state (torch.Tensor): Estado actual.
+            current_steps (int): Número de pasos actuales.
+            train (bool): Indica si el modelo está siendo entrenado. Por defecto: True.
+
+        Returns:
+            torch.Tensor: Acción seleccionada.
+        """
         if train:
             self.epsilon = self.compute_epsilon(current_steps)
-            if random.random() < self.epsilon:
-                return torch.randint(0, self.env.action_space.n, (1,)).item()
+            if random.random() > self.epsilon:
+                # Seleccionar la acción greedy utilizando el modelo de política
+                return (self.q_a(state) + self.q_b(state)).max(1)[1].view(1, 1)
             else:
-                return torch.argmax(
-                    (self.modelo_a(state) + self.modelo_b(state))
-                ).item()
+                # Seleccionar una acción aleatoria del espacio de acciones del entorno
+                return torch.tensor(
+                    [[self.env.action_space.sample()]],
+                    device=self.device,
+                    dtype=torch.long,
+                )
         else:
-            return torch.argmax((self.modelo_a(state) + self.modelo_b(state))).item()
+            # Seleccionar la acción greedy utilizando el modelo de política sin tener en cuenta la exploración epsilon
+            return (self.q_a(state) + self.q_b(state)).max(1)[1].view(1, 1)
+
+    def save_weights(self):
+        """
+        Guarda los pesos de los modelos en dos archivos.
+
+        """
+        torch.save(self.q_a.state_dict(), self.path_pesos_a)
+        torch.save(self.q_b.state_dict(), self.path_pesos_b)
 
     def update_weights(self):
+        """
+        Actualiza los pesos del modelo utilizando el algoritmo de entrenamiento doble DQN.
+
+        """
         if len(self.memory) > self.batch_size:
-            self.minibatch = self.memory.sample(self.batch_size)
-            self.state_batch = torch.cat(
-                [s1 for (s1, a, r, d, s2) in self.minibatch]
-            ).to(self.device)
-            self.action_batch = torch.Tensor(
-                [a for (s1, a, r, d, s2) in self.minibatch]
-            ).to(self.device)
-            self.reward_batch = torch.Tensor(
-                [r for (s1, a, r, d, s2) in self.minibatch]
-            ).to(self.device)
-            self.done_batch = torch.Tensor(
-                [d for (s1, a, r, d, s2) in self.minibatch]
-            ).to(self.device)
-            self.next_state_batch = torch.cat(
-                [s2 for (s1, a, r, d, s2) in self.minibatch]
-            ).to(self.device)
+            # Obtener un minibatch de la memoria. Resultando en tensores de estados, acciones, recompensas, flags de terminación y siguientes estados.
+            transitions = self.memory.sample(self.batch_size)
+            batch = Transition(*zip(*transitions))
+
+            # Enviar los tensores al dispositivo correspondiente.
+            state_batch = torch.cat(batch.state).to(self.device)
+            action_batch = torch.cat(batch.action).to(self.device)
+            reward_batch = torch.cat(batch.reward).unsqueeze(dim=1).to(self.device)
+            # Dones debería ser 0 y 1; no True y False. Pueden usar .float() en un tensor para convertirlo
+            dones = torch.tensor(
+                batch.done, device=self.device, dtype=torch.float
+            ).unsqueeze(dim=1)
+            next_states = torch.cat(batch.next_state).to(self.device)
 
             # Actualizar al azar Q_a o Q_b usando el otro para calcular el valor de los siguientes estados.
-            if random.randrange(0, 2) == 1:
-                Q1 = self.modelo_a(self.state_batch)
-                with torch.no_grad():
-                    Q2 = self.modelo_b(self.next_state_batch)
-
-                Y = self.reward_batch + self.gamma * (
-                    (1 - self.done_batch) * torch.max(Q2, dim=1)[0]
-                )
-                X = Q1.gather(
-                    dim=1, index=self.action_batch.long().unsqueeze(dim=1)
-                ).squeeze()
-                loss = self.loss_function(X, Y.detach())
+            if random.random() > 0.5:
+                # Resetear gradientes
                 self.optimizer_A.zero_grad()
+
+                # Obtener el valor estado-acción (Q) de acuerdo a la policy net para todos los elementos (estados) del minibatch.
+                q_actual = self.q_a(state_batch)
+
+                # Obtener max a' Q para los siguientes estados (del minibatch). Es importante hacer .detach() al resultado de este cálculo.
+                # Si el estado siguiente es terminal (done) este valor debería ser 0.
+                q_siguiente = self.q_b(next_states).detach()
+                max_q_siguiente = torch.max(q_siguiente, dim=1)[0].unsqueeze(dim=1)
+
+                # Calcular el target de DQN de acuerdo a la Ecuación (3) del paper.
+                Y = reward_batch + self.gamma * ((1 - dones) * max_q_siguiente)
+                X = q_actual.gather(1, action_batch)
+
+                # Calcular el costo y actualizar los pesos.
+                # En PyTorch, la función de costo se llama con (predicciones, objetivos) en ese orden.
+                loss = self.loss_function(X.squeeze(), Y.squeeze())
                 loss.backward()
                 self.optimizer_A.step()
+
             else:
-                Q1 = self.modelo_b(self.state_batch)
-                with torch.no_grad():
-                    Q2 = self.modelo_a(self.next_state_batch)
-                # Para el Q elegido:
-                # Obetener el valor estado-accion (Q) de acuerdo al Q seleccionado.
-                Y = self.reward_batch + self.gamma * (
-                    (1 - self.done_batch) * torch.max(Q2, dim=1)[0]
-                )
-                X = Q1.gather(
-                    dim=1, index=self.action_batch.long().unsqueeze(dim=1)
-                ).squeeze()
-                loss = self.loss_function(X, Y.detach())
+                # Resetear gradientes
                 self.optimizer_B.zero_grad()
+
+                # Obtener el valor estado-acción (Q) de acuerdo a la policy net para todos los elementos (estados) del minibatch.
+                q_actual = self.q_b(state_batch)
+
+                # Obtener max a' Q para los siguientes estados (del minibatch). Es importante hacer .detach() al resultado de este cálculo.
+                # Si el estado siguiente es terminal (done) este valor debería ser 0.
+                q_siguiente = self.q_a(next_states).detach()
+                max_q_siguiente = torch.max(q_siguiente, dim=1)[0].unsqueeze(dim=1)
+
+                # Calcular el target de DQN de acuerdo a la Ecuación (3) del paper.
+                Y = reward_batch + self.gamma * ((1 - dones) * max_q_siguiente)
+                X = q_actual.gather(1, action_batch)
+
+                # Calcular el costo y actualizar los pesos.
+                # En PyTorch, la función de costo se llama con (predicciones, objetivos) en ese orden.
+                loss = self.loss_function(X.squeeze(), Y.squeeze())
                 loss.backward()
                 self.optimizer_B.step()
